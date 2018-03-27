@@ -38,7 +38,7 @@ class FatTreeTopo(Topo):
         for (idx, core) in enumerate(self.coreList):
             aggr = int(math.floor(idx / (self.ary / 2)))
             for pod in self.podList:
-                self.addLink(core, pod.aggrList[aggr])
+                self.addLink(core, pod.aggrList[aggr], bw=1000, loss=2)
 
     class Pod():
         def __init__(self, topo=None, id=None):
@@ -58,44 +58,61 @@ class FatTreeTopo(Topo):
 
         def createSwitches(self):
             self.aggrList = [
-                self.topo.addSwitch(('aggr-%s-%d') % (self.id, i))
+                self.topo.addSwitch(('aggr%s%d') % (self.id, i))
                 for i in range(self.aggrNum)
             ]
             self.edgeList = [
-                self.topo.addSwitch(('edge-%s-%d') % (self.id, i))
+                self.topo.addSwitch(('edge%s%d') % (self.id, i))
                 for i in range(self.edgeNum)
             ]
 
         def createHosts(self):
             self.hostList = [
-                self.topo.addHost(('h-%s-%d') % (self.id, i))
+                self.topo.addHost(('h%s%d') % (self.id, i))
                 for i in range(self.hostNum)
             ]
 
         def linkHostsAndEdges(self):
             for (idx, host) in enumerate(self.hostList):
                 edge = int(math.floor(idx / self.edgeNum))
-                self.topo.addLink(self.edgeList[edge], host)
+                self.topo.addLink(self.edgeList[edge], host, bw=100)
 
         def linkEdgesAndAggrs(self):
             for aggr in self.aggrList:
                 for edge in self.edgeList:
-                    self.topo.addLink(aggr, edge)
+                    self.topo.addLink(aggr, edge, bw=100)
 
 
-def test():
+def iperfTest(net):
+    h00, h01, h20 = net.get('h00', 'h01', 'h20')
+    # iperf Server
+    h00.popen('iperf -s -u -i 1 > iperf_server_same_pod', shell=True)
+    h20.popen('iperf -s -u -i 1 > iperf_server_different_pod', shell=True)
+
+    # iperf Client
+    h01.cmdPrint('iperf -c ' + h00.IP() + ' -u -t 10 -I 1 -b 100m')
+    h01.cmdPrint('iperf -c ' + h20.IP() + ' -u -t 10 -I 1 -b 100m')
+
+
+def fattree():
     topo = FatTreeTopo()
 
     net = Mininet(topo=topo, link=TCLink, controller=None)
-    net.addController('controller', controller=RemoteController, ip='192.168.1.32', port=6653)
+    net.addController(
+        'controller',
+        controller=RemoteController,
+        ip='127.0.0.1',
+        port=6653,
+    )
 
     net.start()
     dumpNodeConnections(net.hosts)
-    net.pingAll()
+    net.pingFull()
+    iperfTest(net)
     CLI(net)
     net.stop()
 
 
 if __name__ == '__main__':
     setLogLevel('info')
-    test()
+    fattree()
