@@ -107,19 +107,20 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
 
             # if is login user, add meter
             if ip[0].dst in self.user_to_ip:
+                print('add meter')
                 bands = [parser.OFPMeterBandDrop(
                     type_=ofproto.OFPMBT_DROP,
                     len_=0,
                     rate=100,
                     burst_size=10
                 )]
-                req = [parser.OFPMeterMod(
+                req = parser.OFPMeterMod(
                     datapath=datapath,
                     command=ofproto.OFPMC_ADD,
                     flags=ofproto.OFPMF_KBPS,
                     meter_id=1,
                     bands=bands
-                )]
+                )
                 datapath.send_msg(req)
 
                 match = parser.OFPMatch(in_port=in_port, ipv4_dst=ip[0].dst)
@@ -134,7 +135,7 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
                     command=ofproto.OFPFC_ADD,
                     idle_timeout=3000,
                     priority=2,
-                    instrustions=inst
+                    instructions=inst
                 ))
 
         # learn a mac address to avoid FLOOD next time.
