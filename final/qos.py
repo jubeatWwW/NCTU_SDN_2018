@@ -26,7 +26,13 @@ from ryu.lib.packet import ipv4
 from ryu.lib.packet import tcp
 from ryu.lib.packet import arp
 from ryu.app import simple_switch_13
-import re
+
+ARP_REQUEST = 1
+ARP_REPLY = 2
+AUTH_IP = '10.0.0.87'
+AUTH_SERVER = '10.0.0.1'
+LOGIN_HOST = '10.0.0.2'
+
 
 class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -39,6 +45,11 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
         self.ip_to_mac = {}
         self.ip_to_port = {}
         self.user_to_ip = {}
+        self.online_host = {}
+        self.user_hosts = {}
+
+        self.online_host[AUTH_SERVER] = -1
+        self.online_host[LOGIN_HOST] = -1
 
         # Sample of stplib config.
         #  please refer to stplib.Stp.set_config() for details.
@@ -73,45 +84,59 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
         ip = pkt.get_protocols(ipv4.ipv4)
-        tcpp = pkt.get_protocols(tcp.tcp)
-        arpp = pkt.get_protocols(arp.arp)
-        dst = eth.dst
-        src = eth.src
+        tcppkt = pkt.get_protocols(tcp.tcp)
+        arppkt = pkt.get_protocols(arp.arp)
+        eth_dst = eth.dst
+        eth_src = eth.src
 
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
         self.ip_to_port.setdefault(dpid, {})
 
-        if arpp:
-            print(arpp[0].src_mac, arpp[0].dst_mac, arpp[0].src_ip, arpp[0].dst_ip)
-            if not arpp[0].src_ip in self.ip_to_mac and arpp[0].src_mac != '00:00:00:00:00:00':
-                self.ip_to_mac[arpp[0].src_ip] = arpp[0].src_mac
-            if not arpp[0].src_ip in self.ip_to_port[dpid]:
-                self.ip_to_port[dpid][arpp[0].src_ip] = in_port
+        if arppkt:
+            src_mac = arppkt[0].src_mac
+            dst_mac = arppkt[0].dst_mac
+            src_ip = arppkt[0].src_ip
+            dst_ip = arppkt[0].dst_ip
+            if dst_ip in self.online_host and src_ip in self.online_host:
+                self.mac_to_port[dpid][src_mac] = in_port
+                self.ip_to_port[dpid][src_ip] = in_port
 
-        print(self.ip_to_mac)
-        print(self.ip_to_port)
+                if dst_ip in self.ip_to_port[dpid]:
+                    out_port = self.ip_to_port[dpid][dst_ip]
+                else:
+                    out_port = ofproto.OFPP_FLOOD
+                actions = [parser.OFPActionOutput(out_port)]
 
-        if ip and tcpp:
-            # This packet is sent by Auth server
-            id = str(tcpp[0].dst_port)
-            if ip[0].dst == '10.0.0.87' and tcpp[0].src_port == 1234:
-                pattern = re.compile("^" + id + " (.*)")
-                for i, line in enumerate(open('memberip')):
-                    for match in re.finditer(pattern, line):
-                        if ip[0].src in self.user_to_ip:
-                            self.user_to_ip[ip[0].src].append(match.groups()[0])
-                        else:
-                            self.user_to_ip[ip[0].src] = [match.groups()[0]]
-                print(self.user_to_ip)
+                if out_port != ofproto.OFPP_FLOOD:
+                    print('add flow')
+                    match = parser.OFPMatch(in_port=in_port, ipv4_dst=dst_ip)
+                    self.add_flow(datapath, 1, match, actions)
 
-            # if is login user, add meter
-            if ip[0].dst in self.user_to_ip:
+                data = None
+                if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                    data = msg.data
+
+                out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                          in_port=in_port, actions=actions, data=data)
+                datapath.send_msg(out)
+        elif ip:
+            print('no arp')
+            dst_ip = ip[0].dst
+            src_ip = ip[0].src
+            if tcppkt and dst_ip == AUTH_IP:
+                src_port = tcppkt[0].src_port
+                dst_port = tcppkt[0].dst_port
+                print(src_port, dst_port, src_ip, dst_ip)
+                self.online_host[src_ip] = tcppkt[0].dst_port
+                self.user_hosts.setdefault(dst_port, {})
+                self.user_hosts[dst_port][src_ip] = True
+            if dst_ip in self.online_host and src_ip in self.online_host:
                 print('add meter')
                 bands = [parser.OFPMeterBandDrop(
                     type_=ofproto.OFPMBT_DROP,
                     len_=0,
-                    rate=100,
+                    rate=1000,
                     burst_size=10
                 )]
                 req = parser.OFPMeterMod(
@@ -122,9 +147,8 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
                     bands=bands
                 )
                 datapath.send_msg(req)
-
-                match = parser.OFPMatch(in_port=in_port, ipv4_dst=ip[0].dst)
-                actions = [parser.OFPActionOutput(self.ip_to_port[dpid][ip[0].dst])]
+                match = parser.OFPMatch(in_port=in_port, ipv4_dst=dst_ip)
+                actions = [parser.OFPActionOutput(self.ip_to_port[dpid][dst_ip])]
                 inst = [
                     parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions),
                     parser.OFPInstructionMeter(1, ofproto.OFPIT_METER)
@@ -134,32 +158,23 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
                     match=match,
                     command=ofproto.OFPFC_ADD,
                     idle_timeout=3000,
-                    priority=2,
+                    priority=1,
                     instructions=inst
                 ))
 
-        # learn a mac address to avoid FLOOD next time.
-        self.mac_to_port[dpid][src] = in_port
+            if dst_ip in self.ip_to_port[dpid]:
+                out_port = self.ip_to_port[dpid][dst_ip]
+            else:
+                out_port = ofproto.OFPP_FLOOD
+            actions = [parser.OFPActionOutput(out_port)]
 
-        if dst in self.mac_to_port[dpid]:
-            out_port = self.mac_to_port[dpid][dst]
-        else:
-            out_port = ofproto.OFPP_FLOOD
+            data = None
+            if msg.buffer_id == ofproto.OFP_NO_BUFFER:
+                data = msg.data
 
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            self.add_flow(datapath, 1, match, actions)
-
-        data = None
-        if msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = msg.data
-
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+            out = parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
+                                      in_port=in_port, actions=actions, data=data)
+            datapath.send_msg(out)
 
     @set_ev_cls(stplib.EventTopologyChange, MAIN_DISPATCHER)
     def _topology_change_handler(self, ev):
